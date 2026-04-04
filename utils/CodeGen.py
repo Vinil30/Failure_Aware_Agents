@@ -3,6 +3,7 @@ import torch
 import re
 from typing import Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from utils.ModelManager import ModelManager
 import json
 
 class Output:
@@ -19,41 +20,15 @@ class CodeGenerator:
             model_name: Hugging Face model name
             use_quantization: Use 4-bit quantization to reduce memory
         """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading Qwen model on {self.device}...")
+        """
+        Initialize Qwen code generator using shared model
+        """
+        self.model_name = model_name
+        self.use_quantization = use_quantization
         
-        # Configure quantization if requested
-        if use_quantization and torch.cuda.is_available():
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True
-            )
-            quantization_config = bnb_config
-        else:
-            quantization_config = None
-        
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            padding_side="left"
-        )
-        
-        # Load model
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            low_cpu_mem_usage=True
-        )
-        
-        # Set pad token if missing
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Get shared model instance (LOADED ONLY ONCE)
+        self.manager = ModelManager()
+        self.model, self.tokenizer = self.manager.get_model(model_name, use_quantization)
             
         self.system_prompt = """
 You are an expert competitive programmer and software engineer.

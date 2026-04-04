@@ -5,6 +5,7 @@ import re
 import json
 from typing import List, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from utils.ModelManager import ModelManager
 
 class TestCaseOutput:
     def __init__(self, test_cases: Optional[List[Dict]] = None):
@@ -12,37 +13,8 @@ class TestCaseOutput:
 
 class TestCaseGenerator:
     def __init__(self, model_name="Qwen/Qwen2.5-Coder-7B-Instruct", use_quantization=True):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Load model similarly to CodeGenerator
-        if use_quantization and torch.cuda.is_available():
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True
-            )
-            quantization_config = bnb_config
-        else:
-            quantization_config = None
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            padding_side="left"
-        )
-        
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            low_cpu_mem_usage=True
-        )
-        
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+         self.manager = ModelManager()
+         self.model, self.tokenizer = self.manager.get_model(model_name, use_quantization)
     
     def generate_tests(self, question):
         """Generate test cases for the given problem"""

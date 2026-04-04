@@ -11,6 +11,8 @@ from radon.complexity import cc_visit
 import faiss
 from sentence_transformers import SentenceTransformer
 import os
+import joblib
+from utils.ModelManager import ModelManager
 
 class AgentState(TypedDict):
     question: str
@@ -25,6 +27,7 @@ class AgentState(TypedDict):
     regeneration_count: Optional[int]
     code_history: Optional[List[str]]
     reasoning: Optional[str]  # Added reasoning trace
+    features: Optional[Dict]  # Store features for debugging
 
 class RiskEstimator:
     """Risk estimation model that predicts failure probability"""
@@ -51,7 +54,6 @@ class RiskEstimator:
         # Load trained model (if exists)
         self.model = None
         if os.path.exists(model_path):
-            import joblib
             self.model = joblib.load(model_path)
             
         # Hyperparameters
@@ -408,7 +410,8 @@ def run_pipeline(question: str):
         "risk_score": None,
         "regeneration_count": 0,
         "code_history": [],
-        "reasoning": None
+        "reasoning": None,
+        "features": None
     }
     
     result = graph.invoke(initial_state)
@@ -423,6 +426,9 @@ def run_pipeline(question: str):
     
     if result.get('failure_reason'):
         print(f"Failure reason: {result['failure_reason']}")
+    
+    if result.get('risk_score'):
+        print(f"Risk score: {result['risk_score']:.3f}")
     
     return result
 
