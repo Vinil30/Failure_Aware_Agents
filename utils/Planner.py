@@ -11,8 +11,9 @@ from radon.complexity import cc_visit
 import faiss
 from sentence_transformers import SentenceTransformer
 import os
+import torch
+import torch.nn as nn
 import joblib
-from utils.ModelManager import ModelManager
 
 class AgentState(TypedDict):
     question: str
@@ -26,13 +27,14 @@ class AgentState(TypedDict):
     risk_score: Optional[float]
     regeneration_count: Optional[int]
     code_history: Optional[List[str]]
-    reasoning: Optional[str]  # Added reasoning trace
-    features: Optional[Dict]  # Store features for debugging
+    reasoning: Optional[str]
+    features: Optional[Dict]
 
-class RiskEstimator:
-    """Risk estimation model that predicts failure probability"""
+class ANNRiskEstimator:
+    """ANN-based risk estimation model that predicts failure probability"""
     
-    def __init__(self, model_path: str = "failure_risk_model.pkl", 
+    def __init__(self, 
+                 model_folder: str = "saved_model",
                  csv_file: str = "failure_risk_dataset.csv",
                  faiss_file: str = "history_index.faiss",
                  label_file: str = "history_labels.npy"):
@@ -40,26 +42,71 @@ class RiskEstimator:
         self.csv_file = csv_file
         self.faiss_file = faiss_file
         self.label_file = label_file
+        self.model_folder = model_folder
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Load embedding model
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.embedding_dim = 384
         
-        # Load or initialize FAISS index for history
+        # Load FAISS index for history
         if os.path.exists(faiss_file):
             self.faiss_index = faiss.read_index(faiss_file)
             self.history_labels = list(np.load(label_file))
         else:
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.history_labels = []
+        
+        # Load trained ANN model artifacts
+        self.scaler = joblib.load(f"{model_folder}/scaler.pkl")
+        self.feature_names = joblib.load(f"{model_folder}/feature_names.pkl")
+        
+        # Load threshold
+        if os.path.exists(f"{model_folder}/best_threshold.txt"):
+            with open(f"{model_folder}/best_threshold.txt", 'r') as f:
+                self.threshold = float(f.read().strip())
+        else:
+            self.threshold = 0.5
+        
+        # Load the model architecture
+        checkpoint = torch.load(f"{model_folder}/failure_risk_model.pth", map_location=self.device)
+        input_dim = checkpoint['input_dim']
+        
+        # Define the same architecture as training
+        class ANN(nn.Module):
+            def __init__(self, input_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 256),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(256),
+                    nn.Dropout(0.4),
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(128),
+                    nn.Dropout(0.4),
+                    nn.Linear(128, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, 1)
+                )
             
-        # Load trained model (if exists)
-        self.model = None
-        if os.path.exists(model_path):
-            self.model = joblib.load(model_path)
-            
+            def forward(self, x):
+                return self.net(x)
+        
+        self.model = ANN(input_dim)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.to(self.device)
+        self.model.eval()
+        
         # Hyperparameters
         self.top_k_history = 3
         self.prior_smoothing = 0.1
         
+        print(f"✅ ANN Risk Estimator loaded!")
+        print(f"   - Threshold: {self.threshold:.3f}")
+        print(f"   - Features: {len(self.feature_names)}")
+        print(f"   - Device: {self.device}")
+    
     def compute_features(self, question: str, code: str, confidence: float = 0.5) -> Dict:
         """Extract features from code and question"""
         # AST nodes count
@@ -82,7 +129,8 @@ class RiskEstimator:
         emb = self.embedding_model.encode(question[:500])
         prior = self.compute_prior(emb)
         
-        return {
+        # Base features
+        features = {
             "prompt_len": len(question),
             "code_len": len(code),
             "ast_nodes": ast_nodes,
@@ -90,6 +138,13 @@ class RiskEstimator:
             "confidence": confidence,
             "prior_history": prior
         }
+        
+        # Add engineered features (same as training)
+        features["complexity_per_len"] = features["avg_complexity"] / (features["code_len"] + 1)
+        features["ast_per_len"] = features["ast_nodes"] / (features["code_len"] + 1)
+        features["log_code_len"] = np.log1p(features["code_len"])
+        
+        return features
     
     def compute_prior(self, emb: np.ndarray) -> float:
         """Compute prior probability from historical embeddings"""
@@ -106,54 +161,29 @@ class RiskEstimator:
         return raw * (1 - 2 * self.prior_smoothing) + self.prior_smoothing
     
     def predict_risk(self, question: str, code: str, confidence: float = 0.5) -> Tuple[float, Dict]:
-        """Predict risk score (0-1) where higher = more likely to fail"""
+        """Predict risk score (0-1) using trained ANN model"""
+        # Extract features
         features = self.compute_features(question, code, confidence)
         
-        # If we have a trained model, use it
-        if self.model is not None:
-            feature_vector = np.array([
-                features["prompt_len"],
-                features["code_len"],
-                features["ast_nodes"],
-                features["avg_complexity"],
-                features["confidence"],
-                features["prior_history"]
-            ]).reshape(1, -1)
-            
-            risk_score = self.model.predict_proba(feature_vector)[0][1]  # Probability of failure
-        else:
-            # Fallback: heuristic-based risk estimation
-            risk_score = self._heuristic_risk(features)
-            
-        return risk_score, features
-    
-    def _heuristic_risk(self, features: Dict) -> float:
-        """Fallback heuristic when model isn't trained"""
-        risk = 0.0
+        # Create feature vector in the same order as training
+        feature_vector = []
+        for feature_name in self.feature_names:
+            if feature_name in features:
+                feature_vector.append(features[feature_name])
+            else:
+                feature_vector.append(0.0)
         
-        # Code length risk (longer code = higher risk)
-        if features["code_len"] > 500:
-            risk += 0.3
-        elif features["code_len"] > 200:
-            risk += 0.15
-            
-        # Complexity risk
-        if features["avg_complexity"] > 10:
-            risk += 0.3
-        elif features["avg_complexity"] > 5:
-            risk += 0.15
-            
-        # Low confidence
-        if features["confidence"] < 0.3:
-            risk += 0.2
-            
-        # Prior history risk
-        if features["prior_history"] > 0.7:
-            risk += 0.2
-        elif features["prior_history"] > 0.4:
-            risk += 0.1
-            
-        return min(risk, 1.0)
+        # Scale features
+        feature_array = np.array(feature_vector).reshape(1, -1)
+        scaled_features = self.scaler.transform(feature_array)
+        
+        # Predict with ANN
+        with torch.no_grad():
+            tensor_input = torch.tensor(scaled_features, dtype=torch.float32).to(self.device)
+            logits = self.model(tensor_input)
+            risk_score = torch.sigmoid(logits).cpu().numpy()[0][0]
+        
+        return float(risk_score), features
     
     def update_history(self, question: str, code: str, failed: bool):
         """Update historical data with new sample"""
@@ -167,7 +197,7 @@ class RiskEstimator:
         faiss.write_index(self.faiss_index, self.faiss_file)
         np.save(self.label_file, np.array(self.history_labels))
         
-        # Optionally save to CSV for future training
+        # Optionally save to CSV for future retraining
         features = self.compute_features(question, code)
         features["failed"] = 1 if failed else 0
         
@@ -182,17 +212,17 @@ code_generator = CodeGenerator()
 test_generator = TestCaseGenerator()
 executor = CodeExecutor()
 failure_analyzer = FailureAnalyzer()
-risk_estimator = RiskEstimator()
+risk_estimator = ANNRiskEstimator(model_folder="saved_model")  # ← CHANGE THIS
 
 # Configuration
 RISK_THRESHOLD = 0.6  # If risk > 0.6, trigger failure analysis
-MAX_REGENERATIONS = 3  # Maximum number of regeneration attempts
+MAX_REGENERATIONS = 3
+
+# ... (rest of your code remains exactly the same from here)
 
 def codegen_node(state: AgentState):
     """Generate code with reasoning trace"""
     response = code_generator.generate_code(state["question"])
-    
-    # Extract reasoning if available (assuming response has reasoning attribute)
     reasoning = getattr(response, 'reasoning', '')
     
     return {
@@ -209,8 +239,7 @@ def testgen_node(state: AgentState):
 
 def risk_estimation_node(state: AgentState):
     """Estimate risk of code failure"""
-    # Get confidence from generation (can be extracted from reasoning or defaults)
-    confidence = 0.5  # You can extract this from the generation model
+    confidence = 0.5
     
     risk_score, features = risk_estimator.predict_risk(
         state["question"],
@@ -220,7 +249,7 @@ def risk_estimation_node(state: AgentState):
     
     return {
         "risk_score": risk_score,
-        "features": features  # Store for debugging/logging
+        "features": features
     }
 
 def execute_node(state: AgentState):
@@ -228,7 +257,6 @@ def execute_node(state: AgentState):
     result = executor.execute(state["code"], state["test_cases"])
     
     if result["status"] != "success":
-        # Execution error (e.g., syntax error, runtime error)
         return {
             "execution_result": result,
             "failed_cases": len(state["test_cases"]) if state["test_cases"] else 0,
@@ -263,7 +291,6 @@ def failure_analysis_node(state: AgentState):
 
 def regeneration_node(state: AgentState):
     """Regenerate code based on failure analysis"""
-    # Build enhanced prompt with failure context
     enhanced_prompt = f"""
 Original problem: {state["question"]}
 
@@ -287,40 +314,30 @@ Please provide an improved solution that addresses the issues above.
     }
 
 def should_check_risk(state: AgentState):
-    """Check if we should analyze risk before execution"""
-    # Always check risk if we have code and tests
     return "risk_estimation"
 
 def should_execute(state: AgentState):
-    """Check if we should execute based on risk score"""
     risk_score = state.get("risk_score", 0)
     
-    # If risk is too high, skip execution and go to failure analysis
     if risk_score > RISK_THRESHOLD:
         return "high_risk"
     return "execute"
 
 def should_handle_failure(state: AgentState):
-    """Determine next steps after execution"""
     failed_cases = state.get("failed_cases", 0)
     error_type = state.get("error_type", "")
     regen_count = state.get("regeneration_count", 0)
     
-    # Check if we have failures
     if failed_cases > 0 or error_type == "execution_error":
-        # Check if we can regenerate
         if regen_count < MAX_REGENERATIONS:
             return "regenerate"
         else:
             return "analyze_failure"
     
-    # Success case - update history
     risk_estimator.update_history(state["question"], state["code"], failed=False)
     return "end"
 
 def should_regenerate(state: AgentState):
-    """Check if we should regenerate after analysis"""
-    # After failure analysis, regenerate if we haven't exceeded limit
     if state.get("regeneration_count", 0) < MAX_REGENERATIONS:
         return "regenerate"
     return "end"
@@ -328,7 +345,6 @@ def should_regenerate(state: AgentState):
 # Build the graph
 builder = StateGraph(AgentState)
 
-# Add nodes
 builder.add_node("codegen", codegen_node)
 builder.add_node("testgen", testgen_node)
 builder.add_node("risk_estimation", risk_estimation_node)
@@ -336,66 +352,44 @@ builder.add_node("execute", execute_node)
 builder.add_node("failure_analysis", failure_analysis_node)
 builder.add_node("regenerate", regeneration_node)
 
-# Define edges
 builder.add_edge(START, "codegen")
 builder.add_edge("codegen", "testgen")
 
-# Conditional after test generation
 builder.add_conditional_edges(
     "testgen",
     should_check_risk,
-    {
-        "risk_estimation": "risk_estimation"
-    }
+    {"risk_estimation": "risk_estimation"}
 )
 
-# Conditional after risk estimation
 builder.add_conditional_edges(
     "risk_estimation",
     should_execute,
-    {
-        "high_risk": "failure_analysis",
-        "execute": "execute"
-    }
+    {"high_risk": "failure_analysis", "execute": "execute"}
 )
 
-# Conditional after execution
 builder.add_conditional_edges(
     "execute",
     should_handle_failure,
-    {
-        "regenerate": "regenerate",
-        "analyze_failure": "failure_analysis",
-        "end": END
-    }
+    {"regenerate": "regenerate", "analyze_failure": "failure_analysis", "end": END}
 )
 
-# Conditional after failure analysis
 builder.add_conditional_edges(
     "failure_analysis",
     should_regenerate,
-    {
-        "regenerate": "regenerate",
-        "end": END
-    }
+    {"regenerate": "regenerate", "end": END}
 )
 
-# After regeneration, go back to test generation
 builder.add_edge("regenerate", "testgen")
 
-# Compile the graph
 graph = builder.compile()
 
-# Optional: Add visualization
 def visualize_graph():
-    """Generate graph visualization (requires graphviz)"""
     try:
         from IPython.display import Image, display
         display(Image(graph.get_graph().draw_mermaid_png()))
     except:
         print("Graph visualization not available")
 
-# Example usage
 def run_pipeline(question: str):
     """Run the complete pipeline"""
     initial_state = {
@@ -416,7 +410,6 @@ def run_pipeline(question: str):
     
     result = graph.invoke(initial_state)
     
-    # Print summary
     print(f"\n{'='*50}")
     print(f"Pipeline completed for: {question[:100]}...")
     print(f"Final status: {'Success' if result['failed_cases'] == 0 else 'Failed'}")
@@ -433,6 +426,5 @@ def run_pipeline(question: str):
     return result
 
 if __name__ == "__main__":
-    # Test with a sample question
     sample_question = "Write a function that returns the sum of two numbers"
     result = run_pipeline(sample_question)
