@@ -107,29 +107,32 @@ class ANNRiskEstimator:
         print(f"   - Features: {len(self.feature_names)}")
         print(f"   - Device: {self.device}")
     
-    def compute_features(self, question: str, code: str, confidence: float = 0.5) -> Dict:
-        """Extract features from code and question"""
-        # AST nodes count
-        ast_nodes = 0
+    def compute_features(self, question: str, code: str, confidence: float = 0.92) -> Dict:
+        """Extract features robustly (aligned with training distribution)"""
+
+        # AST nodes
         try:
             tree = ast.parse(code)
             ast_nodes = sum(1 for _ in ast.walk(tree))
         except:
-            pass
-            
-        # Complexity analysis
-        complexity = 0
+            ast_nodes = max(10, len(code) // 5)   # safe fallback
+
+        # Complexity
         try:
             comp = cc_visit(code)
-            complexity = sum(c.complexity for c in comp) / len(comp) if comp else 0
+            complexity = sum(c.complexity for c in comp) / len(comp) if comp else 2.5
         except:
-            pass
-            
-        # Prior history from similar prompts
+            complexity = 2.5  # realistic fallback
+
+        # Prior history
         emb = self.embedding_model.encode(question[:500])
         prior = self.compute_prior(emb)
-        
-        # Base features
+
+        # Clamp values to training-like ranges (VERY IMPORTANT)
+        confidence = float(np.clip(confidence, 0.85, 0.97))
+        prior = float(np.clip(prior, 0.3, 0.8))
+        complexity = float(np.clip(complexity, 1.0, 5.0))
+
         features = {
             "prompt_len": len(question),
             "code_len": len(code),
@@ -138,14 +141,14 @@ class ANNRiskEstimator:
             "confidence": confidence,
             "prior_history": prior
         }
-        
-        # Add engineered features (same as training)
+
+        # engineered features (same as training)
         features["complexity_per_len"] = features["avg_complexity"] / (features["code_len"] + 1)
         features["ast_per_len"] = features["ast_nodes"] / (features["code_len"] + 1)
         features["log_code_len"] = np.log1p(features["code_len"])
-        
+
         return features
-    
+        
     def compute_prior(self, emb: np.ndarray) -> float:
         """Compute prior probability from historical embeddings"""
         if len(self.history_labels) < self.top_k_history:
@@ -160,30 +163,33 @@ class ANNRiskEstimator:
         raw = np.sum(sims * labs) / np.sum(sims)
         return raw * (1 - 2 * self.prior_smoothing) + self.prior_smoothing
     
-    def predict_risk(self, question: str, code: str, confidence: float = 0.5) -> Tuple[float, Dict]:
-        """Predict risk score (0-1) using trained ANN model"""
-        # Extract features
+    def predict_risk(self, question: str, code: str, confidence: float = 0.92):
+        """Stable and correct ANN inference"""
+
         features = self.compute_features(question, code, confidence)
-        
-        # Create feature vector in the same order as training
-        feature_vector = []
-        for feature_name in self.feature_names:
-            if feature_name in features:
-                feature_vector.append(features[feature_name])
-            else:
-                feature_vector.append(0.0)
-        
-        # Scale features
-        feature_array = np.array(feature_vector).reshape(1, -1)
-        scaled_features = self.scaler.transform(feature_array)
-        
-        # Predict with ANN
+
+        # Convert to DataFrame (same as training pipeline)
+        df = pd.DataFrame([features])
+
+        # Align columns EXACTLY like training
+        df = df.reindex(columns=self.feature_names, fill_value=0)
+
+        # Replace any remaining bad values with median-like fallback
+        df = df.fillna(df.median())
+
+        # Scale
+        X = self.scaler.transform(df)
+
+        # Predict
         with torch.no_grad():
-            tensor_input = torch.tensor(scaled_features, dtype=torch.float32).to(self.device)
+            tensor_input = torch.tensor(X, dtype=torch.float32).to(self.device)
             logits = self.model(tensor_input)
-            risk_score = torch.sigmoid(logits).cpu().numpy()[0][0]
-        
-        return float(risk_score), features
+            prob = torch.sigmoid(logits).cpu().numpy()[0][0]
+
+        # Clamp extreme outputs (important for stability)
+        prob = float(np.clip(prob, 0.01, 0.99))
+
+        return prob, features
     
     def update_history(self, question: str, code: str, failed: bool):
         """Update historical data with new sample"""
@@ -288,7 +294,29 @@ def failure_analysis_node(state: AgentState):
         "failure_reason": failure.failure_reason,
         "severity": failure.severity
     }
+import torch
+import numpy as np
 
+def compute_confidence(outputs):
+    """
+    Compute confidence from token probabilities
+    """
+
+    scores = outputs.scores  # logits per step
+    if scores is None:
+        return 0.9  # fallback
+
+    probs = []
+
+    for step_logits in scores:
+        step_probs = torch.softmax(step_logits, dim=-1)
+        max_prob = torch.max(step_probs).item()  # confidence of chosen token
+        probs.append(max_prob)
+
+    # Average confidence across tokens
+    confidence = float(np.mean(probs))
+
+    return confidence
 def regeneration_node(state: AgentState):
     """Regenerate code based on failure analysis"""
     enhanced_prompt = f"""
