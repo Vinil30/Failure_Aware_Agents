@@ -245,14 +245,14 @@ def testgen_node(state: AgentState):
 
 def risk_estimation_node(state: AgentState):
     """Estimate risk of code failure"""
-    confidence = 0.5
-    
+    confidence = code_generator.get_last_confidence() 
+
     risk_score, features = risk_estimator.predict_risk(
         state["question"],
         state["code"],
         confidence
     )
-    
+
     return {
         "risk_score": risk_score,
         "features": features
@@ -294,29 +294,8 @@ def failure_analysis_node(state: AgentState):
         "failure_reason": failure.failure_reason,
         "severity": failure.severity
     }
-import torch
-import numpy as np
 
-def compute_confidence(outputs):
-    """
-    Compute confidence from token probabilities
-    """
 
-    scores = outputs.scores  # logits per step
-    if scores is None:
-        return 0.9  # fallback
-
-    probs = []
-
-    for step_logits in scores:
-        step_probs = torch.softmax(step_logits, dim=-1)
-        max_prob = torch.max(step_probs).item()  # confidence of chosen token
-        probs.append(max_prob)
-
-    # Average confidence across tokens
-    confidence = float(np.mean(probs))
-
-    return confidence
 def regeneration_node(state: AgentState):
     """Regenerate code based on failure analysis"""
     enhanced_prompt = f"""

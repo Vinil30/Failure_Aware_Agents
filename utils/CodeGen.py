@@ -91,21 +91,25 @@ Strict Rules:
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         
         # Calculate confidence (mean log probability)
-        logprobs = []
+        probs_list = []
 
         for i, score in enumerate(outputs.scores):
+            if i >= len(generated_ids):
+                break
+
             probs = torch.softmax(score, dim=-1)
+            token_prob = probs[0, generated_ids[i]].item()
+            probs_list.append(token_prob)
 
-            if i < len(generated_ids):
-                token_prob = probs[0, generated_ids[i]].item()
-                logprobs.append(token_prob)
-
-        # Use probability (NOT logprob)
-        if logprobs:
-            confidence = float(np.mean(logprobs))
+        if probs_list:
+            confidence = float(np.percentile(probs_list, 25))  # ✅ robust (better than mean)
         else:
             confidence = 0.5
-        confidence = float(np.percentile(logprobs, 25))
+
+        # safety clamp
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        # normalize to training distribution
         confidence = self.normalize_confidence(confidence)
         # Parse JSON response
         try:
@@ -127,7 +131,8 @@ Strict Rules:
         self.last_confidence = confidence
         
         return Output(code=code, reasoning=reasoning)
-    def normalize_confidence(self,raw_conf):
+    def normalize_confidence(self, raw_conf):
+        raw_conf = float(np.clip(raw_conf, 0.0, 1.0))
         return 0.85 + (raw_conf * (0.97 - 0.85))
     def _extract_code(self, text):
         """Extract Python code from text"""
