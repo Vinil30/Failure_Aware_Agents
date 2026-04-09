@@ -218,7 +218,7 @@ code_generator = CodeGenerator()
 test_generator = TestCaseGenerator()
 executor = CodeExecutor()
 failure_analyzer = FailureAnalyzer()
-risk_estimator = ANNRiskEstimator(model_folder="saved_model")  # ← CHANGE THIS
+risk_estimator = ANNRiskEstimator(model_folder="/kaggle/working/Failure_Aware_Agents/utils/saved_model/")
 
 # Configuration
 RISK_THRESHOLD = 0.6  # If risk > 0.6, trigger failure analysis
