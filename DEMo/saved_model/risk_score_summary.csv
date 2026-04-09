@@ -1,0 +1,11 @@
+metric,value
+Total test samples,262
+Low risk (<30%),82
+Medium risk (30-60%),80
+High risk (60-80%),21
+Very high risk (≥80%),79
+Mean risk score,0.5456
+Median risk score,0.4558
+Std risk score,0.3300
+Min risk score,0.0763
+Max risk score,1.0000

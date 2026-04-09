@@ -34,7 +34,7 @@ class ANNRiskEstimator:
     """ANN-based risk estimation model that predicts failure probability"""
     
     def __init__(self, 
-                 model_folder: str = "saved_model",
+                 model_folder: str = "/kaggle/working/Failure_Aware_Agents/utils/saved_model/",
                  csv_file: str = "failure_risk_dataset.csv",
                  faiss_file: str = "history_index.faiss",
                  label_file: str = "history_labels.npy"):
