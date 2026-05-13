@@ -246,7 +246,7 @@ def codegen_node(state: AgentState):
     return {
         "code": response.code,
         "reasoning": reasoning,
-        "regeneration_count": state.get("regeneration_count", 0),
+        "regeneration_count": state.get("regeneration_count", 0)+1,
         "code_history": state.get("code_history", []) + [response.code]
     }
 
