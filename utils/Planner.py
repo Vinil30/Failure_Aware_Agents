@@ -11,6 +11,7 @@ from radon.complexity import cc_visit
 import faiss
 from sentence_transformers import SentenceTransformer
 import os
+import sys
 import torch
 import torch.nn as nn
 import joblib
@@ -30,6 +31,7 @@ class AgentState(TypedDict):
     reasoning: Optional[str]
     features: Optional[Dict]
     final_status: Optional[str]
+
 class ANNRiskEstimator:
     def __init__(self, 
                  model_folder: str = "/kaggle/working/Failure_Aware_Agents/utils/saved_model/",
@@ -96,8 +98,8 @@ class ANNRiskEstimator:
         self.model.eval()
         
         # EXACT MATCH to dataset generation
-        self.top_k_history = 2  # ← Changed from 3 to 2
-        self.prior_smoothing = 0.1  # ← EXACT match
+        self.top_k_history = 2
+        self.prior_smoothing = 0.1
         
         print(f"✅ ANN Risk Estimator loaded!")
         print(f"   - Threshold: {self.threshold:.3f}")
@@ -107,39 +109,31 @@ class ANNRiskEstimator:
     def compute_features(self, question: str, code: str, confidence: float = None, logprob: float = None) -> Dict:
         """
         EXACT feature extraction matching dataset generation script.
-        
-        Args:
-            question: The problem prompt
-            code: Generated code
-            confidence: Optional pre-computed confidence (0-1)
-            logprob: Optional logprob to compute confidence from
         """
-        
-        # AST nodes - EXACT match to dataset generation
+        # AST nodes
         ast_nodes = 0
         try:
             tree = ast.parse(code)
             ast_nodes = sum(1 for _ in ast.walk(tree))
         except Exception:
-            ast_nodes = 0  # ← EXACT match: set to 0 on failure
-        
-        # Complexity - EXACT match to dataset generation
+            ast_nodes = 0
+
+        # Complexity
         avg_complexity = 0.0
         try:
             comp = cc_visit(code)
             avg_complexity = sum(c.complexity for c in comp) / len(comp) if comp else 0.0
         except Exception:
-            avg_complexity = 0.0  # ← EXACT match: set to 0 on failure
-        
-        # Confidence - EXACT match to dataset generation
+            avg_complexity = 0.0
+
+        # Confidence
         if confidence is None:
             if logprob is not None:
                 confidence = float(np.clip(np.exp(logprob), 0.0, 1.0))
             else:
-                # Default from dataset median (since training data had this range)
-                confidence = 0.89  # ← Dataset median, not hardcoded high
-        
-        # Prior history - EXACT match to compute_prior() below
+                confidence = 0.89
+
+        # Prior history
         emb = self.embedding_model.encode(question[:500])
         prior = self.compute_prior(emb)
         
@@ -152,7 +146,7 @@ class ANNRiskEstimator:
             "prior_history": prior
         }
         
-        # Engineered features (same as training)
+        # Engineered features
         features["complexity_per_len"] = features["avg_complexity"] / (features["code_len"] + 1)
         features["ast_per_len"] = features["ast_nodes"] / (features["code_len"] + 1)
         features["log_code_len"] = np.log1p(features["code_len"])
@@ -165,15 +159,14 @@ class ANNRiskEstimator:
         Uses TOP_K_HISTORY = 2, PRIOR_SMOOTHING = 0.1
         """
         if len(self.history_labels) < self.top_k_history:
-            return 0.5  # ← EXACT match to dataset generation
-        
+            return 0.5
+
         q = np.array([emb]).astype("float32")
         d, i = self.faiss_index.search(q, self.top_k_history)
-        sims = 1.0 / (1.0 + d[0])  # ← EXACT formula
+        sims = 1.0 / (1.0 + d[0])
         labs = np.array(self.history_labels)[i[0]]
         raw = float(np.sum(sims * labs) / np.sum(sims))
         
-        # EXACT smoothing formula from dataset generation
         return raw * (1 - 2 * self.prior_smoothing) + self.prior_smoothing
     
     def predict_risk(self, question: str, code: str, confidence: float = None, logprob: float = None):
@@ -181,41 +174,30 @@ class ANNRiskEstimator:
         
         features = self.compute_features(question, code, confidence, logprob)
         
-        # Convert to DataFrame
         df = pd.DataFrame([features])
-        
-        # Align columns EXACTLY like training
         df = df.reindex(columns=self.feature_names, fill_value=0)
-        
-        # Replace NaN/Inf with 0 (dataset generation didn't have these issues)
         df = df.replace([np.inf, -np.inf], 0)
         df = df.fillna(0)
         
-        # Scale
         X = self.scaler.transform(df)
         
-        # Predict
         with torch.no_grad():
             tensor_input = torch.tensor(X, dtype=torch.float32).to(self.device)
             logits = self.model(tensor_input)
             prob = torch.sigmoid(logits).cpu().numpy()[0][0]
         
-        # NO CLAMPING - let natural output through
         return prob, features
     
     def update_history(self, question: str, code: str, failed: bool):
-        """Update historical data with new sample - EXACT match to dataset generation"""
+        """Update historical data with new sample"""
         emb = self.embedding_model.encode(question[:500])
         
-        # Update FAISS index
         self.faiss_index.add(np.array([emb]).astype("float32"))
         self.history_labels.append(1 if failed else 0)
         
-        # Save updates
         faiss.write_index(self.faiss_index, self.faiss_file)
         np.save(self.label_file, np.array(self.history_labels))
         
-        # Append to CSV (matching dataset format)
         features = self.compute_features(question, code)
         features["passed_tests"] = 0 if failed else 1
         features["test_error"] = "" if not failed else "user_feedback"
@@ -227,14 +209,16 @@ class ANNRiskEstimator:
         else:
             df_new.to_csv(self.csv_file, index=False)
 
+
 # Initialize components
 code_generator = CodeGenerator()
 failure_analyzer = FailureAnalyzer()
 risk_estimator = ANNRiskEstimator(model_folder="/kaggle/working/Failure_Aware_Agents/utils/saved_model/")
 
 # Configuration
-RISK_THRESHOLD = 0.501  # If risk > 0.6, trigger failure analysis
+RISK_THRESHOLD = 0.501
 MAX_REGENERATIONS = 3
+
 
 # ── Node definitions ──────────────────────────────────────────────────────────
 
@@ -251,11 +235,9 @@ def codegen_node(state: AgentState):
     }
 
 def risk_estimation_node(state: AgentState):
-
     try:
         confidence = code_generator.get_last_raw_confidence()
         logprob = code_generator.get_last_logprob()
-
     except:
         confidence = 0.89
         logprob = -100.0
@@ -267,15 +249,19 @@ def risk_estimation_node(state: AgentState):
         logprob=logprob
     )
 
-    # IMPORTANT FIX
-    final_status = (
-        "FAILED"
-        if risk_score > RISK_THRESHOLD
-        else "SUCCESS"
+    # Derive final_status purely from risk_score vs threshold
+    final_status = "FAILED" if risk_score > RISK_THRESHOLD else "SUCCESS"
+
+    # DEBUG: write to stderr so redirect_stdout in runner.py doesn't swallow it
+    print(
+        f"[DEBUG risk_estimation_node] risk={risk_score:.4f} "
+        f"threshold={RISK_THRESHOLD} → final_status={final_status} "
+        f"regen_count={state.get('regeneration_count', 0)}",
+        file=sys.stderr
     )
 
     return {
-        "risk_score": risk_score,
+        "risk_score": float(risk_score),
         "features": features,
         "final_status": final_status
     }
@@ -318,33 +304,47 @@ Please provide an improved solution that addresses the issues above.
         "code_history": state.get("code_history", []) + [response.code]
     }
 
+
 # ── Routing functions ─────────────────────────────────────────────────────────
 
 def should_execute(state: AgentState):
-
-    if state.get("final_status") == "FAILED":
+    # Derive routing purely from risk_score — never trust final_status string
+    risk_score = state.get("risk_score")
+    
+    if risk_score is None:
+        # No score available — treat as high risk to be safe
+        print("[DEBUG should_execute] risk_score is None → routing to high_risk", file=sys.stderr)
         return "high_risk"
 
+    if risk_score > RISK_THRESHOLD:
+        print(f"[DEBUG should_execute] risk={risk_score:.4f} > {RISK_THRESHOLD} → high_risk", file=sys.stderr)
+        return "high_risk"
+
+    # Low risk — accepted, update history and exit
+    print(f"[DEBUG should_execute] risk={risk_score:.4f} <= {RISK_THRESHOLD} → end (SUCCESS)", file=sys.stderr)
     risk_estimator.update_history(
         state["question"],
         state["code"],
         failed=False
     )
-
     return "end"
 
 def should_regenerate(state: AgentState):
-
-    if state.get("regeneration_count", 0) < MAX_REGENERATIONS:
+    regen_count = state.get("regeneration_count", 0)
+    
+    if regen_count < MAX_REGENERATIONS:
+        print(f"[DEBUG should_regenerate] regen_count={regen_count} < {MAX_REGENERATIONS} → regenerate", file=sys.stderr)
         return "regenerate"
 
+    # Max regenerations hit — update history as failed and exit
+    print(f"[DEBUG should_regenerate] regen_count={regen_count} >= {MAX_REGENERATIONS} → end (FAILED)", file=sys.stderr)
     risk_estimator.update_history(
         state["question"],
         state["code"],
         failed=True
     )
-
     return "end"
+
 
 # ── Graph construction ────────────────────────────────────────────────────────
 
@@ -355,28 +355,25 @@ builder.add_node("risk_estimation", risk_estimation_node)
 builder.add_node("failure_analysis", failure_analysis_node)
 builder.add_node("regenerate", regeneration_node)
 
-# codegen → risk_estimation (always)
 builder.add_edge(START, "codegen")
 builder.add_edge("codegen", "risk_estimation")
 
-# risk_estimation → failure_analysis  OR  end
 builder.add_conditional_edges(
     "risk_estimation",
     should_execute,
     {"high_risk": "failure_analysis", "end": END}
 )
 
-# failure_analysis → regenerate  OR  end
 builder.add_conditional_edges(
     "failure_analysis",
     should_regenerate,
     {"regenerate": "regenerate", "end": END}
 )
 
-# regenerate loops back to risk_estimation (re-score new code)
 builder.add_edge("regenerate", "risk_estimation")
 
 graph = builder.compile()
+
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -386,6 +383,7 @@ def visualize_graph():
         display(Image(graph.get_graph().draw_mermaid_png()))
     except:
         print("Graph visualization not available")
+
 
 def run_pipeline(question: str):
     """Run the complete pipeline"""
@@ -407,27 +405,36 @@ def run_pipeline(question: str):
     }
     
     result = graph.invoke(initial_state)
-    # Force consistency of final status
-    if result.get("risk_score") is not None:
-        result["final_status"] = (
-            "FAILED"
-            if result["risk_score"] > RISK_THRESHOLD
-            else "SUCCESS"
-        )
-    
+
+    # ── FIX: Always derive final_status from risk_score, never trust graph state ──
+    # LangGraph can sometimes return stale/None final_status depending on which
+    # conditional branch was taken last. risk_score is a raw float set in
+    # risk_estimation_node and is always reliable.
+    risk_score = result.get("risk_score")
+
+    if risk_score is not None:
+        derived_status = "SUCCESS" if risk_score <= RISK_THRESHOLD else "FAILED"
+    else:
+        # Absolute fallback — should never happen
+        derived_status = "FAILED"
+
+    result["final_status"] = derived_status
+
     print(f"\n{'='*50}")
     print(f"Pipeline completed for: {question[:100]}...")
-    print(f"Regeneration attempts: {result['regeneration_count']}")
+    print(f"Regeneration attempts: {result.get('regeneration_count', 0)}")
     
     if result.get('failure_reason'):
         print(f"Failure reason: {result['failure_reason']}")
     
-    if result.get('risk_score') is not None:
-        print(f"Risk score: {result['risk_score']:.3f}")
+    if risk_score is not None:
+        print(f"Risk score: {risk_score:.3f}")
 
+    # This is what runner.py's regex parses — must be exactly this format
     print(f"Final status: {result['final_status']}")
     
     return result
+
 
 if __name__ == "__main__":
     sample_question = "Write a function that returns the sum of two numbers"
