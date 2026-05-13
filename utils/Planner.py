@@ -246,7 +246,7 @@ def codegen_node(state: AgentState):
     return {
         "code": response.code,
         "reasoning": reasoning,
-        "regeneration_count": state.get("regeneration_count", 0)+1,
+        "regeneration_count": state.get("regeneration_count", 0),
         "code_history": state.get("code_history", []) + [response.code]
     }
 
@@ -407,6 +407,13 @@ def run_pipeline(question: str):
     }
     
     result = graph.invoke(initial_state)
+    # Force consistency of final status
+    if result.get("risk_score") is not None:
+        result["final_status"] = (
+            "FAILED"
+            if result["risk_score"] > RISK_THRESHOLD
+            else "SUCCESS"
+        )
     
     print(f"\n{'='*50}")
     print(f"Pipeline completed for: {question[:100]}...")
@@ -415,8 +422,10 @@ def run_pipeline(question: str):
     if result.get('failure_reason'):
         print(f"Failure reason: {result['failure_reason']}")
     
-    if result.get('risk_score'):
+    if result.get('risk_score') is not None:
         print(f"Risk score: {result['risk_score']:.3f}")
+
+    print(f"Final status: {result['final_status']}")
     
     return result
 
