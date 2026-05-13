@@ -1,6 +1,7 @@
 import os
 import torch
 import re
+import numpy as np
 from typing import Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from utils.ModelManager import ModelManager
@@ -15,13 +16,6 @@ class CodeGenerator:
     def __init__(self, model_name="Qwen/Qwen2.5-Coder-7B-Instruct", use_quantization=True):
         """
         Initialize Qwen code generator
-        
-        Args:
-            model_name: Hugging Face model name
-            use_quantization: Use 4-bit quantization to reduce memory
-        """
-        """
-        Initialize Qwen code generator using shared model
         """
         self.model_name = model_name
         self.use_quantization = use_quantization
@@ -29,6 +23,9 @@ class CodeGenerator:
         # Get shared model instance (LOADED ONLY ONCE)
         self.manager = ModelManager()
         self.model, self.tokenizer = self.manager.get_model(model_name, use_quantization)
+        
+        # Store generation history for confidence calibration
+        self.confidence_history = []
             
         self.system_prompt = """
 You are an expert competitive programmer and software engineer.
@@ -90,27 +87,37 @@ Strict Rules:
         generated_ids = outputs.sequences[0][inputs['input_ids'].shape[1]:]
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         
-        # Calculate confidence (mean log probability)
+        # Calculate raw confidence (mean token probability)
+        # MATCHING DATASET GENERATION: confidence = exp(mean_logprob)
+        logprobs_list = []
         probs_list = []
 
         for i, score in enumerate(outputs.scores):
             if i >= len(generated_ids):
                 break
-
+            
+            # Get log probs for confidence calculation
+            log_probs = torch.log_softmax(score, dim=-1)
+            token_log_prob = log_probs[0, generated_ids[i]].item()
+            logprobs_list.append(token_log_prob)
+            
+            # Also get raw probabilities for reference
             probs = torch.softmax(score, dim=-1)
             token_prob = probs[0, generated_ids[i]].item()
             probs_list.append(token_prob)
 
-        if probs_list:
-            confidence = float(np.percentile(probs_list, 25))  # ✅ robust (better than mean)
+        if logprobs_list:
+            # EXACT MATCH to dataset generation
+            mean_logprob = float(np.mean(logprobs_list))
+            raw_confidence = float(np.clip(np.exp(mean_logprob), 0.0, 1.0))
         else:
-            confidence = 0.5
-
-        # safety clamp
-        confidence = float(np.clip(confidence, 0.0, 1.0))
-
-        # normalize to training distribution
-        confidence = self.normalize_confidence(confidence)
+            raw_confidence = 0.5
+        
+        # Store both raw and normalized for different uses
+        self.last_logprob = mean_logprob if logprobs_list else -100.0
+        self.last_raw_confidence = raw_confidence
+        self.last_normalized_confidence = self.normalize_confidence(raw_confidence)
+        
         # Parse JSON response
         try:
             # Try to extract JSON from the response
@@ -127,13 +134,29 @@ Strict Rules:
             code = self._extract_code(generated_text)
             reasoning = "Failed to parse JSON response"
         
-        # Store confidence for later use
-        self.last_confidence = confidence
-        
         return Output(code=code, reasoning=reasoning)
+    
     def normalize_confidence(self, raw_conf):
+        """
+        Normalize confidence for compatibility with existing systems.
+        For risk estimation, use raw_confidence (get_last_raw_confidence).
+        """
         raw_conf = float(np.clip(raw_conf, 0.0, 1.0))
+        # This is for other systems that expect 0.85-0.97 range
         return 0.85 + (raw_conf * (0.97 - 0.85))
+    
+    def get_last_confidence(self):
+        """Get NORMALIZED confidence (for backward compatibility)"""
+        return getattr(self, 'last_normalized_confidence', 0.89)
+    
+    def get_last_raw_confidence(self):
+        """Get RAW confidence matching dataset generation"""
+        return getattr(self, 'last_raw_confidence', 0.89)
+    
+    def get_last_logprob(self):
+        """Get raw logprob for exact dataset matching"""
+        return getattr(self, 'last_logprob', -100.0)
+    
     def _extract_code(self, text):
         """Extract Python code from text"""
         # Remove markdown code blocks
@@ -147,10 +170,3 @@ Strict Rules:
         
         # If no function found, return cleaned text
         return text.strip()
-    
-    def get_last_confidence(self):
-        """Get confidence from last generation"""
-        return getattr(self, 'last_confidence', -100.0)
-
-# Optional: Add NP import at top
-import numpy as np
