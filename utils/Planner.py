@@ -219,7 +219,7 @@ failure_analyzer = FailureAnalyzer()
 risk_estimator = ANNRiskEstimator(model_folder="/kaggle/working/Failure_Aware_Agents/utils/saved_model/")
 
 # Configuration
-RISK_THRESHOLD = 0.6  # If risk > 0.6, trigger failure analysis
+RISK_THRESHOLD = 0.501  # If risk > 0.6, trigger failure analysis
 MAX_REGENERATIONS = 3
 
 # ── Node definitions ──────────────────────────────────────────────────────────
