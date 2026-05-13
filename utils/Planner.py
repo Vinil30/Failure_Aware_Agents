@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     code_history: Optional[List[str]]
     reasoning: Optional[str]
     features: Optional[Dict]
+    final_status: Optional[str]
 class ANNRiskEstimator:
     def __init__(self, 
                  model_folder: str = "/kaggle/working/Failure_Aware_Agents/utils/saved_model/",
@@ -245,7 +246,7 @@ def codegen_node(state: AgentState):
     return {
         "code": response.code,
         "reasoning": reasoning,
-        "regeneration_count": state.get("regeneration_count", 0) + 1,
+        "regeneration_count": state.get("regeneration_count", 0),
         "code_history": state.get("code_history", []) + [response.code]
     }
 
@@ -314,20 +315,27 @@ Please provide an improved solution that addresses the issues above.
 # ── Routing functions ─────────────────────────────────────────────────────────
 
 def should_execute(state: AgentState):
-    """After risk estimation: high risk → failure analysis, low risk → end"""
     risk_score = state.get("risk_score", 0)
 
     if risk_score > RISK_THRESHOLD:
+        state["final_status"] = "FAILED"
         return "high_risk"
-    
-    # Low risk — record as success and exit
-    risk_estimator.update_history(state["question"], state["code"], failed=False)
+
+    state["final_status"] = "SUCCESS"
+
+    risk_estimator.update_history(
+        state["question"],
+        state["code"],
+        failed=False
+    )
+
     return "end"
 
 def should_regenerate(state: AgentState):
-    """After failure analysis: regenerate if attempts remain, else end"""
+
     if state.get("regeneration_count", 0) < MAX_REGENERATIONS:
         return "regenerate"
+    state["final_status"] = "FAILED"
     return "end"
 
 # ── Graph construction ────────────────────────────────────────────────────────
@@ -386,7 +394,8 @@ def run_pipeline(question: str):
         "regeneration_count": 0,
         "code_history": [],
         "reasoning": None,
-        "features": None
+        "features": None,
+        "final_status": None
     }
     
     result = graph.invoke(initial_state)
