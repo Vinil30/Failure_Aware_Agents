@@ -29,10 +29,7 @@ class AgentState(TypedDict):
     code_history: Optional[List[str]]
     reasoning: Optional[str]
     features: Optional[Dict]
-
 class ANNRiskEstimator:
-    """ANN-based risk estimation model that predicts failure probability"""
-    
     def __init__(self, 
                  model_folder: str = "/kaggle/working/Failure_Aware_Agents/utils/saved_model/",
                  csv_file: str = "failure_risk_dataset.csv",
@@ -61,7 +58,7 @@ class ANNRiskEstimator:
         self.scaler = joblib.load(f"{model_folder}/scaler.pkl")
         self.feature_names = joblib.load(f"{model_folder}/feature_names.pkl")
         
-        # Load threshold
+        # Load threshold from training
         if os.path.exists(f"{model_folder}/best_threshold.txt"):
             with open(f"{model_folder}/best_threshold.txt", 'r') as f:
                 self.threshold = float(f.read().strip())
@@ -72,7 +69,6 @@ class ANNRiskEstimator:
         checkpoint = torch.load(f"{model_folder}/failure_risk_model.pth", map_location=self.device)
         input_dim = checkpoint['input_dim']
         
-        # Define the same architecture as training
         class ANN(nn.Module):
             def __init__(self, input_dim):
                 super().__init__()
@@ -98,101 +94,116 @@ class ANNRiskEstimator:
         self.model.to(self.device)
         self.model.eval()
         
-        # Hyperparameters
-        self.top_k_history = 3
-        self.prior_smoothing = 0.1
+        # EXACT MATCH to dataset generation
+        self.top_k_history = 2  # ← Changed from 3 to 2
+        self.prior_smoothing = 0.1  # ← EXACT match
         
         print(f"✅ ANN Risk Estimator loaded!")
         print(f"   - Threshold: {self.threshold:.3f}")
         print(f"   - Features: {len(self.feature_names)}")
         print(f"   - Device: {self.device}")
     
-    def compute_features(self, question: str, code: str, confidence: float = 0.92) -> Dict:
-        """Extract features robustly (aligned with training distribution)"""
-
-        # AST nodes
+    def compute_features(self, question: str, code: str, confidence: float = None, logprob: float = None) -> Dict:
+        """
+        EXACT feature extraction matching dataset generation script.
+        
+        Args:
+            question: The problem prompt
+            code: Generated code
+            confidence: Optional pre-computed confidence (0-1)
+            logprob: Optional logprob to compute confidence from
+        """
+        
+        # AST nodes - EXACT match to dataset generation
+        ast_nodes = 0
         try:
             tree = ast.parse(code)
             ast_nodes = sum(1 for _ in ast.walk(tree))
-        except:
-            ast_nodes = max(10, len(code) // 5)   # safe fallback
-
-        # Complexity
+        except Exception:
+            ast_nodes = 0  # ← EXACT match: set to 0 on failure
+        
+        # Complexity - EXACT match to dataset generation
+        avg_complexity = 0.0
         try:
             comp = cc_visit(code)
-            complexity = sum(c.complexity for c in comp) / len(comp) if comp else 2.5
-        except:
-            complexity = 2.5  # realistic fallback
-
-        # Prior history
+            avg_complexity = sum(c.complexity for c in comp) / len(comp) if comp else 0.0
+        except Exception:
+            avg_complexity = 0.0  # ← EXACT match: set to 0 on failure
+        
+        # Confidence - EXACT match to dataset generation
+        if confidence is None:
+            if logprob is not None:
+                confidence = float(np.clip(np.exp(logprob), 0.0, 1.0))
+            else:
+                # Default from dataset median (since training data had this range)
+                confidence = 0.89  # ← Dataset median, not hardcoded high
+        
+        # Prior history - EXACT match to compute_prior() below
         emb = self.embedding_model.encode(question[:500])
         prior = self.compute_prior(emb)
-
-        # Clamp values to training-like ranges (VERY IMPORTANT)
-        confidence = float(np.clip(confidence, 0.85, 0.97))
-        prior = float(np.clip(prior, 0.3, 0.8))
-        complexity = float(np.clip(complexity, 1.0, 5.0))
-
+        
         features = {
             "prompt_len": len(question),
             "code_len": len(code),
             "ast_nodes": ast_nodes,
-            "avg_complexity": complexity,
+            "avg_complexity": avg_complexity,
             "confidence": confidence,
             "prior_history": prior
         }
-
-        # engineered features (same as training)
+        
+        # Engineered features (same as training)
         features["complexity_per_len"] = features["avg_complexity"] / (features["code_len"] + 1)
         features["ast_per_len"] = features["ast_nodes"] / (features["code_len"] + 1)
         features["log_code_len"] = np.log1p(features["code_len"])
-
-        return features
         
+        return features
+    
     def compute_prior(self, emb: np.ndarray) -> float:
-        """Compute prior probability from historical embeddings"""
+        """
+        EXACT match to dataset generation's compute_prior()
+        Uses TOP_K_HISTORY = 2, PRIOR_SMOOTHING = 0.1
+        """
         if len(self.history_labels) < self.top_k_history:
-            return 0.5
-            
+            return 0.5  # ← EXACT match to dataset generation
+        
         q = np.array([emb]).astype("float32")
         d, i = self.faiss_index.search(q, self.top_k_history)
-        
-        sims = 1 / (1 + d[0])
+        sims = 1.0 / (1.0 + d[0])  # ← EXACT formula
         labs = np.array(self.history_labels)[i[0]]
+        raw = float(np.sum(sims * labs) / np.sum(sims))
         
-        raw = np.sum(sims * labs) / np.sum(sims)
+        # EXACT smoothing formula from dataset generation
         return raw * (1 - 2 * self.prior_smoothing) + self.prior_smoothing
     
-    def predict_risk(self, question: str, code: str, confidence: float = 0.92):
-        """Stable and correct ANN inference"""
-
-        features = self.compute_features(question, code, confidence)
-
-        # Convert to DataFrame (same as training pipeline)
+    def predict_risk(self, question: str, code: str, confidence: float = None, logprob: float = None):
+        """Predict risk using EXACT feature extraction matching training data"""
+        
+        features = self.compute_features(question, code, confidence, logprob)
+        
+        # Convert to DataFrame
         df = pd.DataFrame([features])
-
+        
         # Align columns EXACTLY like training
         df = df.reindex(columns=self.feature_names, fill_value=0)
-
-        # Replace any remaining bad values with median-like fallback
-        df = df.fillna(df.median())
-
+        
+        # Replace NaN/Inf with 0 (dataset generation didn't have these issues)
+        df = df.replace([np.inf, -np.inf], 0)
+        df = df.fillna(0)
+        
         # Scale
         X = self.scaler.transform(df)
-
+        
         # Predict
         with torch.no_grad():
             tensor_input = torch.tensor(X, dtype=torch.float32).to(self.device)
             logits = self.model(tensor_input)
             prob = torch.sigmoid(logits).cpu().numpy()[0][0]
-
-        # Clamp extreme outputs (important for stability)
-        prob = float(np.clip(prob, 0.01, 0.99))
-
+        
+        # NO CLAMPING - let natural output through
         return prob, features
     
     def update_history(self, question: str, code: str, failed: bool):
-        """Update historical data with new sample"""
+        """Update historical data with new sample - EXACT match to dataset generation"""
         emb = self.embedding_model.encode(question[:500])
         
         # Update FAISS index
@@ -203,8 +214,10 @@ class ANNRiskEstimator:
         faiss.write_index(self.faiss_index, self.faiss_file)
         np.save(self.label_file, np.array(self.history_labels))
         
-        # Optionally save to CSV for future retraining
+        # Append to CSV (matching dataset format)
         features = self.compute_features(question, code)
+        features["passed_tests"] = 0 if failed else 1
+        features["test_error"] = "" if not failed else "user_feedback"
         features["failed"] = 1 if failed else 0
         
         df_new = pd.DataFrame([features])
@@ -237,13 +250,22 @@ def codegen_node(state: AgentState):
     }
 
 def risk_estimation_node(state: AgentState):
-    """Estimate risk of code failure"""
-    confidence = code_generator.get_last_confidence() 
-
+    """Estimate risk of code failure using RAW confidence (matching dataset)"""
+    
+    # Get RAW confidence from code generator (not normalized)
+    try:
+        # Use raw confidence that matches dataset generation
+        confidence = code_generator.get_last_raw_confidence()
+        logprob = code_generator.get_last_logprob()
+    except:
+        confidence = 0.89  # Dataset median fallback
+        logprob = -100.0
+    
     risk_score, features = risk_estimator.predict_risk(
         state["question"],
         state["code"],
-        confidence
+        confidence=confidence,  # ← Now using 0-1 raw confidence
+        logprob=logprob
     )
 
     return {
