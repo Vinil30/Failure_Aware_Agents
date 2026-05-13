@@ -215,8 +215,6 @@ class ANNRiskEstimator:
 
 # Initialize components
 code_generator = CodeGenerator()
-test_generator = TestCaseGenerator()
-executor = CodeExecutor()
 failure_analyzer = FailureAnalyzer()
 risk_estimator = ANNRiskEstimator(model_folder="/kaggle/working/Failure_Aware_Agents/utils/saved_model/")
 
@@ -224,7 +222,7 @@ risk_estimator = ANNRiskEstimator(model_folder="/kaggle/working/Failure_Aware_Ag
 RISK_THRESHOLD = 0.6  # If risk > 0.6, trigger failure analysis
 MAX_REGENERATIONS = 3
 
-# ... (rest of your code remains exactly the same from here)
+# ── Node definitions ──────────────────────────────────────────────────────────
 
 def codegen_node(state: AgentState):
     """Generate code with reasoning trace"""
@@ -237,11 +235,6 @@ def codegen_node(state: AgentState):
         "regeneration_count": state.get("regeneration_count", 0) + 1,
         "code_history": state.get("code_history", []) + [response.code]
     }
-
-def testgen_node(state: AgentState):
-    """Generate test cases"""
-    response = test_generator.generate_tests(state["question"])
-    return {"test_cases": response.test_cases}
 
 def risk_estimation_node(state: AgentState):
     """Estimate risk of code failure"""
@@ -258,29 +251,6 @@ def risk_estimation_node(state: AgentState):
         "features": features
     }
 
-def execute_node(state: AgentState):
-    """Execute code with test cases"""
-    result = executor.execute(state["code"], state["test_cases"])
-    
-    if result["status"] != "success":
-        return {
-            "execution_result": result,
-            "failed_cases": len(state["test_cases"]) if state["test_cases"] else 0,
-            "passed_cases": 0,
-            "error_type": "execution_error"
-        }
-    
-    results = result["results"]
-    passed = sum(1 for r in results if r.get("passed"))
-    failed = sum(1 for r in results if not r.get("passed"))
-    
-    return {
-        "execution_result": result,
-        "failed_cases": failed,
-        "passed_cases": passed,
-        "error_type": "test_failure" if failed > 0 else "success"
-    }
-
 def failure_analysis_node(state: AgentState):
     """Analyze failure and provide reasoning"""
     failure = failure_analyzer.analyze(
@@ -294,7 +264,6 @@ def failure_analysis_node(state: AgentState):
         "failure_reason": failure.failure_reason,
         "severity": failure.severity
     }
-
 
 def regeneration_node(state: AgentState):
     """Regenerate code based on failure analysis"""
@@ -320,75 +289,58 @@ Please provide an improved solution that addresses the issues above.
         "code_history": state.get("code_history", []) + [response.code]
     }
 
-def should_check_risk(state: AgentState):
-    return "risk_estimation"
+# ── Routing functions ─────────────────────────────────────────────────────────
 
 def should_execute(state: AgentState):
+    """After risk estimation: high risk → failure analysis, low risk → end"""
     risk_score = state.get("risk_score", 0)
-    
+
     if risk_score > RISK_THRESHOLD:
         return "high_risk"
-    return "execute"
-
-def should_handle_failure(state: AgentState):
-    failed_cases = state.get("failed_cases", 0)
-    error_type = state.get("error_type", "")
-    regen_count = state.get("regeneration_count", 0)
     
-    if failed_cases > 0 or error_type == "execution_error":
-        if regen_count < MAX_REGENERATIONS:
-            return "regenerate"
-        else:
-            return "analyze_failure"
-    
+    # Low risk — record as success and exit
     risk_estimator.update_history(state["question"], state["code"], failed=False)
     return "end"
 
 def should_regenerate(state: AgentState):
+    """After failure analysis: regenerate if attempts remain, else end"""
     if state.get("regeneration_count", 0) < MAX_REGENERATIONS:
         return "regenerate"
     return "end"
 
-# Build the graph
+# ── Graph construction ────────────────────────────────────────────────────────
+
 builder = StateGraph(AgentState)
 
 builder.add_node("codegen", codegen_node)
-builder.add_node("testgen", testgen_node)
 builder.add_node("risk_estimation", risk_estimation_node)
-builder.add_node("execute", execute_node)
 builder.add_node("failure_analysis", failure_analysis_node)
 builder.add_node("regenerate", regeneration_node)
 
+# codegen → risk_estimation (always)
 builder.add_edge(START, "codegen")
-builder.add_edge("codegen", "testgen")
+builder.add_edge("codegen", "risk_estimation")
 
-builder.add_conditional_edges(
-    "testgen",
-    should_check_risk,
-    {"risk_estimation": "risk_estimation"}
-)
-
+# risk_estimation → failure_analysis  OR  end
 builder.add_conditional_edges(
     "risk_estimation",
     should_execute,
-    {"high_risk": "failure_analysis", "execute": "execute"}
+    {"high_risk": "failure_analysis", "end": END}
 )
 
-builder.add_conditional_edges(
-    "execute",
-    should_handle_failure,
-    {"regenerate": "regenerate", "analyze_failure": "failure_analysis", "end": END}
-)
-
+# failure_analysis → regenerate  OR  end
 builder.add_conditional_edges(
     "failure_analysis",
     should_regenerate,
     {"regenerate": "regenerate", "end": END}
 )
 
-builder.add_edge("regenerate", "testgen")
+# regenerate loops back to risk_estimation (re-score new code)
+builder.add_edge("regenerate", "risk_estimation")
 
 graph = builder.compile()
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
 def visualize_graph():
     try:
@@ -419,9 +371,6 @@ def run_pipeline(question: str):
     
     print(f"\n{'='*50}")
     print(f"Pipeline completed for: {question[:100]}...")
-    print(f"Final status: {'Success' if result['failed_cases'] == 0 else 'Failed'}")
-    print(f"Passed tests: {result['passed_cases']}")
-    print(f"Failed tests: {result['failed_cases']}")
     print(f"Regeneration attempts: {result['regeneration_count']}")
     
     if result.get('failure_reason'):
