@@ -251,27 +251,33 @@ def codegen_node(state: AgentState):
     }
 
 def risk_estimation_node(state: AgentState):
-    """Estimate risk of code failure using RAW confidence (matching dataset)"""
-    
-    # Get RAW confidence from code generator (not normalized)
+
     try:
-        # Use raw confidence that matches dataset generation
         confidence = code_generator.get_last_raw_confidence()
         logprob = code_generator.get_last_logprob()
+
     except:
-        confidence = 0.89  # Dataset median fallback
+        confidence = 0.89
         logprob = -100.0
-    
+
     risk_score, features = risk_estimator.predict_risk(
         state["question"],
         state["code"],
-        confidence=confidence,  # ← Now using 0-1 raw confidence
+        confidence=confidence,
         logprob=logprob
+    )
+
+    # IMPORTANT FIX
+    final_status = (
+        "FAILED"
+        if risk_score > RISK_THRESHOLD
+        else "SUCCESS"
     )
 
     return {
         "risk_score": risk_score,
-        "features": features
+        "features": features,
+        "final_status": final_status
     }
 
 def failure_analysis_node(state: AgentState):
@@ -315,13 +321,9 @@ Please provide an improved solution that addresses the issues above.
 # ── Routing functions ─────────────────────────────────────────────────────────
 
 def should_execute(state: AgentState):
-    risk_score = state.get("risk_score", 0)
 
-    if risk_score > RISK_THRESHOLD:
-        state["final_status"] = "FAILED"
+    if state.get("final_status") == "FAILED":
         return "high_risk"
-
-    state["final_status"] = "SUCCESS"
 
     risk_estimator.update_history(
         state["question"],
@@ -335,7 +337,13 @@ def should_regenerate(state: AgentState):
 
     if state.get("regeneration_count", 0) < MAX_REGENERATIONS:
         return "regenerate"
-    state["final_status"] = "FAILED"
+
+    risk_estimator.update_history(
+        state["question"],
+        state["code"],
+        failed=True
+    )
+
     return "end"
 
 # ── Graph construction ────────────────────────────────────────────────────────
